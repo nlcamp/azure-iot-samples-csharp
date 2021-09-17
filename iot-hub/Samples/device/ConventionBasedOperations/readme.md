@@ -4,6 +4,8 @@ Device(s)/module(s) connecting to IoT Hub that announce their DTDL model ID duri
 
 These devices/modules can now use the Azure IoT Plug and Play APIs in the Azure IoT device SDKs to directly exchange messages with an IoT Hub, without having to manually format these messages to follow the Azure IoT Plug and Play convention.
 
+> Convention-based APIs are currently supported only over MQTT. Please try it out and let us know on our [discussions](https://github.com/Azure/azure-iot-sdk-csharp/discussions) page if you have any concerns, questions, or further changes you'd like to see!
+
 ## Table of Contents
 
 - [Client initialization](#client-initialization)
@@ -14,6 +16,7 @@ These devices/modules can now use the Azure IoT Plug and Play APIs in the Azure 
   - [Telemetry](#telemetry)
   - [Commands](#commands)
   - [Properties](#properties)
+  - [Notes](#notes)
 - [IoT Plug And Play device samples](#iot-plug-and-play-device-samples)
 
 ## Client initialization
@@ -297,11 +300,11 @@ if (isTargetTemperatureUpdateRequested)
  ClientProperties properties = await _deviceClient.GetClientPropertiesAsync(cancellationToken);
 
 // To fetch the value of client reported property "serialNumber".
-bool isSerialNumberReported = properties.TryGetValue("serialNumber", out string serialNumberReported);
+bool isSerialNumberReported = properties.ReportedFromClient.TryGetValue("serialNumber", out string serialNumberReported);
 
 
 // To fetch the value of service requested "targetTemperature" value.
-bool isTargetTemperatureUpdateRequested = properties.Writable.TryGetValue("targetTemperature", out double targetTemperatureUpdateRequest);
+bool isTargetTemperatureUpdateRequested = properties.WritablePropertyRequests.TryGetValue("targetTemperature", out double targetTemperatureUpdateRequest);
 ```
 
 ### Retrive component-level client properties:
@@ -340,11 +343,11 @@ if (isTargetTemperatureUpdateRequested)
  ClientProperties properties = await _deviceClient.GetClientPropertiesAsync(cancellationToken);
 
 // To fetch the value of client reported property "serialNumber" under component "thermostat1".
-bool isSerialNumberReported = properties.TryGetValue("thermostat1", "serialNumber", out string serialNumberReported);
+bool isSerialNumberReported = properties.ReportedFromClient.TryGetValue("thermostat1", "serialNumber", out string serialNumberReported);
 
 
 // To fetch the value of service requested "targetTemperature" value under component "thermostat1".
-bool isTargetTemperatureUpdateRequested = properties.Writable.TryGetValue("thermostat1", "targetTemperature", out double targetTemperatureUpdateRequest);
+bool isTargetTemperatureUpdateRequested = properties.WritablePropertyRequests.TryGetValue("thermostat1", "targetTemperature", out double targetTemperatureUpdateRequest);
 ```
 
 ### Update top-level property:
@@ -442,18 +445,15 @@ await _deviceClient.SetDesiredPropertyUpdateCallbackAsync(
 ```csharp
 // Subscribe and respond to event for writable property "targetTemperature".
 // This writable property update response should follow the format specified here: https://docs.microsoft.com/azure/iot-pnp/concepts-convention#writable-properties.
-await _deviceClient.SubscribeToWritablePropertiesEventAsync(
+await _deviceClient.SubscribeToWritablePropertyUpdateRequestsAsync(
     async (writableProperties, userContext) =>
     {
-        if (writableProperties.TryGetValue("targetTemperature", out double targetTemperature))
+        if (writableProperties.TryGetValue("targetTemperature", out WritableClientProperty targetTemperatureRequested))
         {
-            IWritablePropertyResponse writableResponse = _deviceClient
-                .PayloadConvention
-                .PayloadSerializer
-                .CreateWritablePropertyResponse(targetTemperature, CommonClientResponseCodes.OK, writableProperties.Version, "The operation completed successfully.");
-
             var propertiesToBeUpdated = new ClientPropertyCollection();
-            propertiesToBeUpdated.AddRootProperty("targetTemperature", writableResponse);
+            propertiesToBeUpdated.AddRootProperty(
+                "targetTemperature",
+                targetTemperatureRequested.AcknowledgeWith(CommonClientResponseCodes.OK, "The operation completed successfully."));
 
             ClientPropertiesUpdateResponse updateResponse = await _deviceClient.UpdateClientPropertiesAsync(propertiesToBeUpdated, cancellationToken);
         }
@@ -512,18 +512,16 @@ await _deviceClient.SetDesiredPropertyUpdateCallbackAsync(
 // Subscribe and respond to event for writable property "targetTemperature"
 // under component "thermostat1".
 // This writable property update response should follow the format specified here: https://docs.microsoft.com/azure/iot-pnp/concepts-convention#writable-properties.
-await _deviceClient.SubscribeToWritablePropertiesEventAsync(
+await _deviceClient.SubscribeToWritablePropertyUpdateRequestsAsync(
     async (writableProperties, userContext) =>
     {
-        if (writableProperties.TryGetValue("thermostat1", "targetTemperature", out double targetTemperature))
+        if (writableProperties.TryGetValue("thermostat1", "targetTemperature", out WritableClientProperty targetTemperatureRequested))
         {
-            IWritablePropertyResponse writableResponse = _deviceClient
-                .PayloadConvention
-                .PayloadSerializer
-                .CreateWritablePropertyResponse(targetTemperature, CommonClientResponseCodes.OK, writableProperties.Version, "The operation completed successfully.");
-
             var propertiesToBeUpdated = new ClientPropertyCollection();
-            propertiesToBeUpdated.AddComponentProperty("thermostat1", "targetTemperature", writableResponse);
+            propertiesToBeUpdated.AddComponentProperty(
+                "thermostat1",
+                "targetTemperature",
+                targetTemperatureRequested.AcknowledgeWith(CommonClientResponseCodes.OK, "The operation completed successfully."));
 
             ClientPropertiesUpdateResponse updateResponse = await _deviceClient.UpdateClientPropertiesAsync(propertiesToBeUpdated, cancellationToken);
         }
@@ -531,6 +529,29 @@ await _deviceClient.SubscribeToWritablePropertiesEventAsync(
     null,
     cancellationToken);
 ```
+
+## Notes
+
+The following points describe the behavior of the client when both convention-aware and non-convention-aware callbacks are subscribed to at the same time.
+
+### Commands
+
+Commands subscription is implemented over the default handler. This gives rise to the following scenarios:
+1. You've set both `SubscribeToCommandsAsync` and `SetMethodDefaultHandlerAsync`.
+    
+    Since both of these APIs set the default handler, the handler that is set the last will overwrite any previously set handler and that is the one which would always get triggered.
+
+2. You've set `SubscribeToCommandsAsync` and a method-specific `SetMethodHandlerAsync`. 
+    
+    This will set the callback supplied to `SubscribeToCommandsAsync` to the default handler while the callback supplied to `SetMethodDefaultHandlerAsync` would be set for the method-specific handler. The order in which these callbacks are set doesn't matter in this case.
+    - If you invoke the method (or command, in convention-aware terms) that was set via `SetMethodDefaultHandlerAsync`, `SetMethodDefaultHandlerAsync` callback would be triggered.
+    - Any other method (or command, in convention-aware terms) would invoke the `SubscribeToCommandsAsync` callback.
+
+### Properties
+
+Both convention-aware property updates (`SubscribeToWritablePropertyUpdateRequestsAsync`) and non-conventiom-aware twin desired property updates (`SetDesiredPropertyUpdateCallbackAsync`) are implemented over the default handler, i.e. property updates are not received on a per-property specific handler.
+
+Since both of these APIs set the default handler, the order in which these callbacks are set is relevant. The handler that is set the last will overwrite any previously set handler and that is the one which would always get triggered.
 
 # IoT Plug And Play device samples
 
