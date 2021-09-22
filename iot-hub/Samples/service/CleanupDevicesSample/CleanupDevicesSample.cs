@@ -4,6 +4,7 @@
 using Azure.Storage.Blobs;
 using Azure.Storage.Blobs.Models;
 using Azure.Storage.Sas;
+using Microsoft.Azure.Devices;
 using Microsoft.Azure.Devices.Common.Exceptions;
 using Newtonsoft.Json;
 using System;
@@ -124,14 +125,16 @@ namespace Microsoft.Azure.Devices.Samples
             // As a result, the count of ExportImportDevice identities to be deleted might be greater than the
             // count of IoT hub devices retrieved in PrintDeviceCountAsync().
             var devicesToBeDeleted = new List<ExportImportDevice>();
-            foreach (var device in exportedDevices)
+            foreach (var expDevice in exportedDevices)
             {
-                string deviceId = device.Id;
+                string deviceId = expDevice.Id;
                 foreach (string prefix in _deleteDevicesWithPrefix)
                 {
                     if (deviceId.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                     {
-                        devicesToBeDeleted.Add(device);
+                        Device device = await _registryManager.GetDeviceAsync(deviceId);
+                        if (device.ConnectionState == DeviceConnectionState.Connected) break;
+                        devicesToBeDeleted.Add(expDevice);
                     }
                 }
             }
